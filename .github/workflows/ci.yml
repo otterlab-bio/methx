@@ -1,0 +1,83 @@
+name: methx CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Rust quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout methx
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Prepare evidence directory
+        run: mkdir -p ci-artifacts
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check 2>&1 | tee ci-artifacts/cargo-fmt.log
+
+      - name: Run Clippy with warnings denied
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings 2>&1 | tee ci-artifacts/cargo-clippy.log
+
+      - name: Run test suite
+        run: cargo test --all-targets --all-features --locked 2>&1 | tee ci-artifacts/cargo-test.log
+
+      - name: Build release binary
+        run: cargo build --release --locked --features download 2>&1 | tee ci-artifacts/cargo-build.log
+
+      - name: Verify CLI surface
+        run: |
+          set -euo pipefail
+          ./target/release/methx --version | tee ci-artifacts/methx-version.txt
+          ./target/release/methx --help | tee ci-artifacts/methx-help.txt
+          ./target/release/methx process --help | tee ci-artifacts/methx-process-help.txt
+
+      - name: Upload methx quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: methx-quality-evidence
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then gate_result="PASS"; else gate_result="-"; fi
+          bash scripts/ci/job-summary.sh \
+            --verdict "${{ job.status }}" \
+            --title "methx — quality gate" \
+            --checked "Formatting, Clippy with warnings denied, the test suite, a release build, and a smoke check of the methx CLI surface." \
+            --check "cargo fmt --check|no diffs|see step log|${gate_result}" \
+            --check "cargo clippy -D warnings|no warnings|see step log|${gate_result}" \
+            --check "Test suite|all tests pass|see step log|${gate_result}" \
+            --check "Release build|binary builds|see step log|${gate_result}" \
+            --check "CLI surface|--version, --help, process --help respond|see step log|${gate_result}" \
+            --limit "These rows are pass/fail gates with no numeric comparison, so the Result column carries the job verdict and the Observed column points at the step log." \
+            --artifact "methx-quality-evidence" \
+            --limit "Static quality gate over the source tree. CpG annotation parity against Methrix and HDF5 interoperability are asserted by the E2E workflow, not here."

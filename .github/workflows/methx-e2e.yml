@@ -1,0 +1,151 @@
+name: methx-e2e
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "**"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "**"
+      - ".github/workflows/methx-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl zlib1g-dev r-base-core r-bioc-rhdf5
+
+      - name: Build methx with trusted download support
+        run: |
+          set -euo pipefail
+          cargo build --release --features download
+          ./target/release/methx --help | head -n 20
+
+      - name: Download and verify hg19 with methx
+        run: |
+          set -euo pipefail
+          mkdir -p testdata/hg19_genome
+          ./target/release/methx download-genome \
+            --genome hg19 \
+            --output testdata/hg19_genome
+          test -s testdata/hg19_genome/hg19.fa
+          test -s testdata/hg19_genome/hg19.fa.provenance.ron
+          ./target/release/methx download-genome \
+            --genome hg19 \
+            --output testdata/hg19_genome
+          ls -lh testdata/hg19_genome/hg19.fa testdata/hg19_genome/hg19.fa.provenance.ron
+
+      - name: Download hg19 GTF for annotation test
+        run: |
+          set -euo pipefail
+          mkdir -p testdata/annotations
+          curl -fL --retry 5 --retry-delay 5 \
+            -o testdata/annotations/hg19.gtf.gz \
+            https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/genes/hg19.refGene.gtf.gz
+          gzip -t testdata/annotations/hg19.gtf.gz
+          ls -lh testdata/annotations/hg19.gtf.gz
+
+      - name: E2E test with GTF annotation
+        run: |
+          set -euo pipefail
+          ./target/release/methx process \
+            --input testdata \
+            --output testdata/output_e2e \
+            --genome testdata/hg19_genome/hg19.fa \
+            --annotation-dir testdata/annotations \
+            --threads 4 \
+            --min-coverage 1 \
+            --remove-uncovered
+
+          test -s testdata/output_e2e/assays.h5
+          test -s testdata/output_e2e/methrix_data.h5
+          test -s testdata/output_e2e/CpG_coverage.xlsx
+          test -s testdata/output_e2e/CpG_annotation_report.xlsx
+          test -s testdata/output_e2e/CpG_annotation_details.tsv.gz
+          gzip -t testdata/output_e2e/CpG_annotation_details.tsv.gz
+
+          # The workbook is bounded summary data; unbounded CpG details are TSV.gz.
+          python3 - <<'PY'
+          import gzip
+          import zipfile
+          from pathlib import Path
+
+          report = Path("testdata/output_e2e/CpG_annotation_report.xlsx")
+          assert report.exists() and report.stat().st_size > 0, "annotation report missing"
+          with zipfile.ZipFile(report) as zf:
+            workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
+          assert "ChIPseeker_By_Sample" in workbook_xml, "missing ChIPseeker_By_Sample sheet"
+          assert "CpG_Details" not in workbook_xml, "unbounded CpG_Details must not be stored in Excel"
+          assert "ChIPseeker_Summary" not in workbook_xml, "legacy ChIPseeker_Summary should not exist"
+          assert "CpG_Context" not in workbook_xml, "legacy CpG_Context sheet should not exist"
+
+          details = Path("testdata/output_e2e/CpG_annotation_details.tsv.gz")
+          with gzip.open(details, "rt", encoding="utf-8") as handle:
+            header = handle.readline().rstrip("\n").split("\t")
+          assert header == [
+            "chr", "start_1based", "end_1based", "strand", "annotation",
+            "gene_id", "gene_symbol", "transcript_id", "distance_to_tss",
+            "exon_intron_rank",
+          ], f"unexpected annotation detail header: {header}"
+          PY
+
+          ls -lh testdata/output_e2e
+
+      - name: R rhdf5 direct schema check
+        run: |
+          set -euo pipefail
+          Rscript tests/integration/test_r_compatibility.R testdata/output_e2e/assays.h5
+
+      - name: QC report compatibility check
+        run: |
+          set -euo pipefail
+          ./target/release/methx qc-report \
+            --input testdata/output_e2e \
+            --output testdata/output_e2e/CpG_coverage_recomputed_from_h5.xlsx
+          test -s testdata/output_e2e/CpG_coverage_recomputed_from_h5.xlsx
+
+      - name: Upload QC and annotation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: methx-qc-annotation-${{ github.run_id }}
+          path: |
+            testdata/hg19_genome/hg19.fa.provenance.ron
+            testdata/output_e2e/CpG_coverage.xlsx
+            testdata/output_e2e/CpG_coverage_recomputed_from_h5.xlsx
+            testdata/output_e2e/CpG_annotation_report.xlsx
+            testdata/output_e2e/CpG_annotation_details.tsv.gz
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then gate_result="PASS"; else gate_result="-"; fi
+          bash scripts/ci/job-summary.sh \
+            --verdict "${{ job.status }}" \
+            --title "methx — end-to-end CpG annotation and HDF5 interoperability" \
+            --checked "Downloads and verifies a real reference with methx itself, runs the CpG annotation end to end, then checks the HDF5 schema from R with rhdf5 and regenerates a QC report from the stored HDF5 rather than from the in-memory state." \
+            --check "Reference download and verification|provenance recorded|see step log|${gate_result}" \
+            --check "End-to-end annotation with GTF|completes|see step log|${gate_result}" \
+            --check "R rhdf5 direct schema check|schema matches|see step log|${gate_result}" \
+            --check "QC report from stored HDF5|regenerated file is non-empty|see step log|${gate_result}" \
+            --metric "Reference|hg19 (downloaded and checksum-tracked in-run)" \
+            --metric "R dependency|r-bioc-rhdf5 installed in the job" \
+            --limit "These rows are pass/fail gates with no numeric comparison, so the Result column carries the job verdict and the Observed column points at the step log." \
+            --artifact "methx-qc-annotation-${{ github.run_id }}" \
+            --limit "Interoperability and end-to-end annotation coverage on the CI reference. It is not the production CpG universe parity claim, which is recorded separately against Methrix for a frozen reference." \
+            --note "The rhdf5 check is what proves the HDF5 layout is readable by the R side, rather than only by methx itself."
