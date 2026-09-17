@@ -158,7 +158,6 @@ The repository includes two GitHub Actions workflows:
 - [Build guide](docs/BUILD.md)
 - [HDF5 structure](docs/HDF5_STRUCTURE_AND_COORDINATES.md)
 - [R/Methrix compatibility](docs/R_METHRIX_COMPATIBILITY_GUIDE.md)
-- [Testing quick reference](docs/TESTING_QUICK_REF.md)
 
 ## License and repository
 

@@ -158,7 +158,7 @@ Bismark 文件读取模块。
   **返回**: `Vec<SampleStats>`
 
 ### `hdf5::se_compat`
-HDF5 SummarizedExperiment 兼容写入模块。
+`methx.custom-hdf5/1.0.0` 自定义 schema 写入模块；不声明原生 SummarizedExperiment loader 兼容。
 
 #### 类
 - `SummarizedExperimentWriter` - H5 文件写入器
