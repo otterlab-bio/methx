@@ -2,7 +2,10 @@
 
 ## Overview
 
-methx is a high-performance Rust command-line tool that processes Bismark bisulfite sequencing data into methrix-compatible HDF5 format. It provides a complete alternative to the original R script with significant performance improvements and no R runtime dependency.
+methx is a Rust command-line tool that processes Bismark bisulfite sequencing
+data into the versioned `methx.custom-hdf5` schema. Producing the custom HDF5
+and QC outputs does not require R; exporting a native Methrix directory uses
+the repository's R conversion script.
 
 ## What Was Built
 
@@ -27,8 +30,9 @@ methx is a high-performance Rust command-line tool that processes Bismark bisulf
    - Generates methylation and coverage matrices
 
 4. **HDF5 Output** (`src/hdf5/se_compat.rs`)
-   - Creates SummarizedExperiment-compatible H5 files
-   - Compatible with R's `load_HDF5_methrix()`
+   - Creates the custom `methx.custom-hdf5` schema (readable with R `rhdf5`)
+   - Convertible to a native methrix directory with `scripts/export_methrix_hdf5.R`
+     (not directly loadable by `load_HDF5_methrix()`)
    - Proper HDF5 group structure (assays, rowData, colData, metadata)
    - GZIP compression for storage efficiency
 
@@ -99,21 +103,20 @@ methx/
 
 ## Key Features
 
-### Performance
-- **5-10x faster** than R implementation
-- **30-50% less memory** usage
-- **Sub-second startup** time
-- **Parallel processing** with configurable threads
+### Processing
+- Memory-mapped uncompressed Bismark input and streamed gzip input
+- Parallel processing with configurable threads
+- Chunked, compressed HDF5 matrices with atomic publication
 
 ### Compatibility
-- **100% compatible** H5 output with R methrix package
-- Supports same input formats as original
-- Generates identical results (within floating point precision)
+- Versioned custom HDF5 readable through explicit `rhdf5` dataset paths
+- Native Methrix export through `scripts/export_methrix_hdf5.R`
+- No claim of direct `methrix::load_HDF5_methrix()` compatibility for the
+  custom file
 
 ### Usability
 - **Single binary** deployment
-- **No R dependency** for end users
-- **Cross-platform** (Linux, macOS, Windows)
+- **No R dependency** for custom HDF5 generation
 - **Clear error messages** and progress reporting
 
 ## Usage Example
@@ -131,9 +134,10 @@ cargo build --release
   --min-coverage 1 \
   --remove-uncovered
 
-# Use in R
+# Use in R: convert the custom H5 to a native methrix directory first
+# Rscript -e 'source("scripts/export_methrix_hdf5.R"); export_methx_h5_to_methrix("results/assays.h5", "results/methrix_h5", validate = TRUE)'
 library(methrix)
-m <- load_HDF5_methrix("results/methrix_data.h5")
+m <- load_HDF5_methrix("results/methrix_h5")
 get_stats(m)
 plot_coverage(m)
 ```

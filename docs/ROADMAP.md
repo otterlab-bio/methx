@@ -6,7 +6,7 @@
 - [x] CpG extraction from FASTA files
 - [x] Bismark file parsing (compressed and uncompressed)
 - [x] Parallel processing pipeline
-- [x] HDF5 output (SummarizedExperiment compatible)
+- [x] Versioned custom HDF5 output with an explicit native Methrix export path
 - [x] Coverage statistics calculation
 - [x] QC report generation (Excel format)
 - [x] Remove uncovered loci

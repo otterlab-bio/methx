@@ -2,15 +2,18 @@
 
 ## Overview
 
-methx is a high-performance command-line tool for processing Bismark bisulfite sequencing data into methrix-compatible HDF5 format. It provides a Rust-based alternative to the original R script with significant performance improvements.
+methx is a Rust command-line tool for processing Bismark bisulfite sequencing
+data into the versioned `methx.custom-hdf5` schema.
 
 ## Key Features
 
-✅ **No R dependency** - Standalone binary, no need to install R or Bioconductor
-✅ **5-10x faster** - Optimized I/O and parallel processing
-✅ **30-50% less memory** - Efficient memory management
-✅ **100% compatible** - Generated H5 files work with R methrix package
-✅ **Cross-platform** - Works on Linux, macOS, and Windows
+- **Standalone processing** — producing custom HDF5 and QC outputs does not
+  require an R runtime.
+- **Parallel processing** — `--threads` controls the Rayon worker pool.
+- **Explicit schema** — `/beta`, `/cov`, row/column metadata, coordinates, and
+  loader compatibility are versioned and validated before publication.
+- **Native Methrix export** — R and Bioconductor are required only when
+  converting the custom HDF5 file with `scripts/export_methrix_hdf5.R`.
 
 ## Quick Start
 
@@ -38,10 +41,17 @@ cargo build --release
 ### 3. Use in R
 
 ```r
-library(methrix)
+# The generated file is a custom HDF5 schema, NOT a native methrix directory.
+# Convert it first with the official exporter, then load:
+source("scripts/export_methrix_hdf5.R")
+export_methx_h5_to_methrix(
+  methx_h5_path    = "results/assays.h5",
+  output_directory = "results/methrix_h5",
+  validate         = TRUE
+)
 
-# Load the generated H5 file
-m <- load_HDF5_methrix("results/methrix_data.h5")
+library(methrix)
+m <- load_HDF5_methrix("results/methrix_h5")
 
 # Use all standard methrix functions
 get_stats(m)
@@ -219,10 +229,12 @@ Processing 100 samples (~10M CpGs each):
 
 ### H5 loading error in R
 
-**Solution**: Verify compatibility:
+**Solution**: The custom H5 file cannot be loaded with `load_HDF5_methrix()`
+directly. Convert it first:
 ```r
-library(methrix)
-m <- load_HDF5_methrix("methrix_data.h5")
+source("scripts/export_methrix_hdf5.R")
+export_methx_h5_to_methrix("assays.h5", "methrix_h5", validate = TRUE)
+m <- methrix::load_HDF5_methrix("methrix_h5")
 ```
 
 ## Examples
@@ -268,10 +280,12 @@ methx qc-report \
 After processing, use R methrix for analysis:
 
 ```r
-library(methrix)
+# Convert the custom H5 output to a native methrix directory first
+source("scripts/export_methrix_hdf5.R")
+export_methx_h5_to_methrix("results/assays.h5", "results/methrix_h5", validate = TRUE)
 
-# Load data
-m <- load_HDF5_methrix("results/methrix_data.h5")
+library(methrix)
+m <- load_HDF5_methrix("results/methrix_h5")
 
 # QC
 get_stats(m)
