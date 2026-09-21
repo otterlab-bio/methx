@@ -25,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl zlib1g-dev r-base-core r-bioc-rhdf5
+          sudo apt-get install -y curl time zlib1g-dev r-base-core r-bioc-rhdf5
 
       - name: Build methx with trusted download support
         run: |
@@ -116,6 +116,182 @@ jobs:
             --output testdata/output_e2e/CpG_coverage_recomputed_from_h5.xlsx
           test -s testdata/output_e2e/CpG_coverage_recomputed_from_h5.xlsx
 
+      - name: Set up pinned Methrix parity environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: tests/resources/methrix-parity.yaml
+          environment-name: methrix-parity
+          cache-environment: true
+          init-shell: bash
+
+      - name: Prepare bounded chr21 parity inputs and RON reference
+        run: |
+          set -euo pipefail
+          parity_directory="ci-artifacts/methrix-parity"
+          mkdir -p \
+            "$parity_directory/input" \
+            "$parity_directory/reference" \
+            "$parity_directory/methx-output" \
+            "$parity_directory/native-export"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("testdata/hg19_genome/hg19.fa")
+          destination = Path("ci-artifacts/methrix-parity/reference/hg19_chr21.fa")
+          writing = False
+          found = False
+          with source.open() as input_handle, destination.open("w") as output_handle:
+              for line in input_handle:
+                  if line.startswith(">"):
+                      contig = line[1:].split(maxsplit=1)[0]
+                      if writing and contig != "chr21":
+                          break
+                      writing = contig == "chr21"
+                      found = found or writing
+                  if writing:
+                      output_handle.write(line)
+          if not found or destination.stat().st_size == 0:
+              raise SystemExit("chr21 was not found in the downloaded hg19 FASTA")
+          PY
+          python3 - <<'PY'
+          import gzip
+          from pathlib import Path
+
+          sources = sorted(Path("testdata").glob("*.bismark.cov.gz"))
+          if len(sources) != 2:
+              raise SystemExit(f"expected two Bismark coverage files, found {len(sources)}")
+          output_directory = Path("ci-artifacts/methrix-parity/input")
+          for sample_index, source in enumerate(sources, start=1):
+              destination = output_directory / f"sample_{sample_index}.bismark.cov.gz"
+              retained = 0
+              with gzip.open(source, "rt") as input_handle, destination.open("wb") as raw_output:
+                  with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
+                      for line in input_handle:
+                          if line.startswith("chr21\t"):
+                              compressed.write(line.encode("utf-8"))
+                              retained += 1
+              if retained == 0:
+                  raise SystemExit(f"{source} contained no chr21 records")
+              print(f"{destination}: {retained} chr21 records")
+          PY
+          ./target/release/methx extract-cpgs \
+            --genome "$parity_directory/reference/hg19_chr21.fa" \
+            --output "$parity_directory/reference/reference_cpgs.ron"
+          test -s "$parity_directory/reference/reference_cpgs.ron"
+
+      - name: Run methx parity arm with resource measurement
+        run: |
+          set -euo pipefail
+          parity_directory="ci-artifacts/methrix-parity"
+          /usr/bin/time \
+            -f '{"elapsed_seconds": %e, "max_rss_kib": %M}' \
+            -o "$parity_directory/methx-resources.json" \
+            ./target/release/methx process \
+              --input "$parity_directory/input" \
+              --output "$parity_directory/methx-output" \
+              --genome "$parity_directory/reference/reference_cpgs.ron" \
+              --threads 4 \
+              --min-coverage 1 \
+              --remove-uncovered false \
+              --skip-annotation
+          test -s "$parity_directory/methx-output/assays.h5"
+
+      - name: Run Methrix parity arm with resource measurement
+        run: |
+          set -euo pipefail
+          parity_directory="ci-artifacts/methrix-parity"
+          /usr/bin/time \
+            -f '{"elapsed_seconds": %e, "max_rss_kib": %M}' \
+            -o "$parity_directory/methrix-resources.json" \
+            micromamba run -n methrix-parity Rscript \
+              tests/integration/run_methrix_reference.R \
+              "$parity_directory/methx-output/assays.h5" \
+              "$parity_directory/reference/hg19_chr21.fa" \
+              "$parity_directory/input" \
+              "$parity_directory/methrix-object.rds" \
+              "$parity_directory/methrix-metadata.tsv"
+          test -s "$parity_directory/methrix-object.rds"
+          test -s "$parity_directory/methrix-metadata.tsv"
+
+      - name: Compare CpG universe and final matrices
+        run: |
+          set -euo pipefail
+          parity_directory="ci-artifacts/methrix-parity"
+          micromamba run -n methrix-parity Rscript \
+            tests/integration/compare_methx_methrix.R \
+            "$parity_directory/methx-output/assays.h5" \
+            "$parity_directory/methrix-object.rds" \
+            "$parity_directory/methrix-metadata.tsv" \
+            "$parity_directory/parity-report.json"
+          test -s "$parity_directory/parity-report.json"
+
+      - name: Validate native Methrix export and assemble evidence
+        run: |
+          set -euo pipefail
+          parity_directory="ci-artifacts/methrix-parity"
+          METHX_H5="$parity_directory/methx-output/assays.h5" \
+          NATIVE_EXPORT="$parity_directory/native-export" \
+            micromamba run -n methrix-parity Rscript -e '
+              source("scripts/export_methrix_hdf5.R")
+              export_methx_h5_to_methrix(
+                Sys.getenv("METHX_H5"),
+                Sys.getenv("NATIVE_EXPORT"),
+                replace = TRUE,
+                beta_tolerance = 1e-6,
+                validate = TRUE
+              )
+            '
+          PARITY_DIRECTORY="$parity_directory" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PARITY_DIRECTORY"])
+          report_path = root / "parity-report.json"
+          report = json.loads(report_path.read_text())
+          methx_resources = json.loads((root / "methx-resources.json").read_text())
+          methrix_resources = json.loads((root / "methrix-resources.json").read_text())
+          report["resources"] = {
+              "measurement_scope": "same GitHub-hosted runner, same chr21 RON-derived universe and coverage inputs",
+              "methx": {
+                  **methx_resources,
+                  "max_rss_mib": round(methx_resources["max_rss_kib"] / 1024, 3),
+                  "scope": "process plus custom HDF5 and QC publication",
+              },
+              "methrix": {
+                  **methrix_resources,
+                  "max_rss_mib": round(methrix_resources["max_rss_kib"] / 1024, 3),
+                  "scope": "read_bedgraphs plus RDS evidence serialization",
+              },
+          }
+          report["interoperability"] = {
+              "native_methrix_export_reloaded": True,
+              "beta_tolerance": 1e-6,
+          }
+          report["resource_comparison"] = {
+              "methx_elapsed_seconds": methx_resources["elapsed_seconds"],
+              "methx_max_rss_mib": round(methx_resources["max_rss_kib"] / 1024, 3),
+              "methrix_elapsed_seconds": methrix_resources["elapsed_seconds"],
+              "methrix_max_rss_mib": round(methrix_resources["max_rss_kib"] / 1024, 3),
+          }
+          report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload Methx-Methrix parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: methx-methrix-parity-${{ github.run_id }}
+          path: |
+            ci-artifacts/methrix-parity/parity-report.json
+            ci-artifacts/methrix-parity/methx-resources.json
+            ci-artifacts/methrix-parity/methrix-resources.json
+            ci-artifacts/methrix-parity/methrix-metadata.tsv
+            ci-artifacts/methrix-parity/reference/reference_cpgs.ron
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload QC and annotation artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -135,17 +311,45 @@ jobs:
         continue-on-error: true
         run: |
           if [ "${{ job.status }}" = "success" ]; then gate_result="PASS"; else gate_result="-"; fi
+          parity_report="ci-artifacts/methrix-parity/parity-report.json"
+          bash scripts/ci/summary-field.sh \
+            "$parity_report#software.methrix_version" \
+            "$parity_report#reference.cpg_count" \
+            "$parity_report#reference.biostrings_universe_mismatches" \
+            "$parity_report#matrix.covered_cpg_count" \
+            "$parity_report#matrix.covered_set_mismatches" \
+            "$parity_report#matrix.coverage_value_mismatches" \
+            "$parity_report#matrix.beta_missing_mask_mismatches" \
+            "$parity_report#matrix.beta_mismatches_over_1e_6" \
+            "$parity_report#matrix.maximum_beta_absolute_difference" \
+            "$parity_report#matrix.matrix_mismatch_cells" \
+            "$parity_report#interoperability.native_methrix_export_reloaded" \
+            "$parity_report#resource_comparison.methx_elapsed_seconds" \
+            "$parity_report#resource_comparison.methx_max_rss_mib" \
+            "$parity_report#resource_comparison.methrix_elapsed_seconds" \
+            "$parity_report#resource_comparison.methrix_max_rss_mib" \
+            > ci-artifacts/methrix-parity/summary-fields.txt 2>/dev/null || true
+          field() { rg -N "^$1=" ci-artifacts/methrix-parity/summary-fields.txt 2>/dev/null | sed -n '1s/^[^=]*=//p' || echo "-"; }
           bash scripts/ci/job-summary.sh \
             --verdict "${{ job.status }}" \
-            --title "methx — end-to-end CpG annotation and HDF5 interoperability" \
-            --checked "Downloads and verifies a real reference with methx itself, runs the CpG annotation end to end, then checks the HDF5 schema from R with rhdf5 and regenerates a QC report from the stored HDF5 rather than from the in-memory state." \
+            --title "methx — end-to-end annotation, Methrix parity, and HDF5 interoperability" \
+            --scope "hg19 chr21, two Bismark coverage samples, four threads" \
+            --checked "Runs the production annotation path, validates the custom HDF5 schema from R, and performs a bounded Methx-Methrix parity audit. The parity arm derives a complete chr21 CpG universe from a RON reference, checks it against Biostrings, runs both implementations on identical coverage files, compares covered CpG sets and matrix cells, and records wall time and peak RSS on the same runner." \
             --check "Reference download and verification|provenance recorded|see step log|${gate_result}" \
             --check "End-to-end annotation with GTF|completes|see step log|${gate_result}" \
+            --check "RON CpG universe vs Biostrings|0 mismatches|$(field cpg_count) CpGs; $(field biostrings_universe_mismatches) mismatches|${gate_result}" \
+            --check "Covered CpG set parity|0 mismatches|$(field covered_cpg_count) CpGs; $(field covered_set_mismatches) mismatches|${gate_result}" \
+            --check "Coverage matrix parity|0 mismatches|$(field coverage_value_mismatches)|${gate_result}" \
+            --check "Beta matrix parity|0 missing-mask and 0 values >1e-6|mask $(field beta_missing_mask_mismatches); values $(field beta_mismatches_over_1e_6); max $(field maximum_beta_absolute_difference)|${gate_result}" \
+            --check "Complete matrix parity|0 mismatching cells|$(field matrix_mismatch_cells)|${gate_result}" \
+            --check "Native Methrix export|reload and validate|$(field native_methrix_export_reloaded)|${gate_result}" \
             --check "R rhdf5 direct schema check|schema matches|see step log|${gate_result}" \
             --check "QC report from stored HDF5|regenerated file is non-empty|see step log|${gate_result}" \
-            --metric "Reference|hg19 (downloaded and checksum-tracked in-run)" \
-            --metric "R dependency|r-bioc-rhdf5 installed in the job" \
-            --limit "These rows are pass/fail gates with no numeric comparison, so the Result column carries the job verdict and the Observed column points at the step log." \
+            --metric "Methrix version|$(field methrix_version)" \
+            --metric "methx measured command|$(field methx_elapsed_seconds) s; $(field methx_max_rss_mib) MiB peak RSS" \
+            --metric "Methrix measured command|$(field methrix_elapsed_seconds) s; $(field methrix_max_rss_mib) MiB peak RSS" \
+            --artifact "methx-methrix-parity-${{ github.run_id }}" \
             --artifact "methx-qc-annotation-${{ github.run_id }}" \
-            --limit "Interoperability and end-to-end annotation coverage on the CI reference. It is not the production CpG universe parity claim, which is recorded separately against Methrix for a frozen reference." \
-            --note "The rhdf5 check is what proves the HDF5 layout is readable by the R side, rather than only by methx itself."
+            --limit "The parity and resource comparison is bounded to hg19 chr21 and two repository coverage samples. It validates the comparison method but does not replace the full-genome eRRBS production measurements reported in Supplementary Note 4." \
+            --limit "Both commands run on the same GitHub-hosted runner and identical inputs, but their measured output work differs: methx publishes custom HDF5 plus QC, whereas Methrix serializes an RDS evidence object. Treat elapsed time and RSS as descriptive implementation evidence, not a hardware-normalized benchmark." \
+            --note "The custom methx HDF5 remains a separate schema; the explicit exporter creates and reloads the native Methrix directory."
