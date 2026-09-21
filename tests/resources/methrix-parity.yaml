@@ -9,3 +9,4 @@ dependencies:
   - bioconductor-biostrings
   - bioconductor-rhdf5
   - r-jsonlite
+  - r-r.utils
