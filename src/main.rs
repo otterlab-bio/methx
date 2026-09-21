@@ -38,7 +38,13 @@ enum Commands {
         min_coverage: u32,
 
         /// Remove loci uncovered across all samples
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        #[arg(
+            long,
+            default_value_t = true,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            action = clap::ArgAction::Set
+        )]
         remove_uncovered: bool,
 
         /// Directory containing gene annotation GTF (e.g. hg19.gtf or hg19.gtf.gz)
