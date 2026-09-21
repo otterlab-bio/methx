@@ -150,7 +150,7 @@ cargo test --all-targets --all-features --locked
 The repository includes two GitHub Actions workflows:
 
 - `.github/workflows/ci.yml`: runs on `push`, `pull_request`, and manual dispatch. Validates formatting (`cargo fmt --check`), denies Clippy warnings, runs the full unit and integration test suite, builds the release binary with `--features download`, and checks CLI help surfaces. Logs and metrics are uploaded as artifacts with `if: always()`.
-- `.github/workflows/methx-e2e.yml`: runs end-to-end Bismark processing with automated hg19 genome and GTF annotation download, native custom HDF5 output validation, R `rhdf5` direct schema verification, and Excel/TSV annotation report integrity. Artifacts are uploaded for 90 days.
+- `.github/workflows/methx-e2e.yml`: runs end-to-end Bismark processing with automated hg19 genome and GTF annotation download, validates the custom HDF5 schema from R, and audits Methx-Methrix parity on a bounded chr21 corpus. The parity gate compares the RON-derived CpG universe with `Biostrings`, then requires identical covered CpG sets, coverage values, beta missing-value masks, and beta values within $10^{-6}$. It also reloads the native Methrix export and records command wall time and peak RSS on the same runner. Evidence artifacts are retained for 90 days.
 
 ## Documentation
 

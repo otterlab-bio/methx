@@ -76,3 +76,52 @@ fn process_command_runs_minimal_pipeline_from_fasta() {
         vec![3, 8]
     );
 }
+
+#[test]
+fn process_command_can_retain_uncovered_reference_cpgs() {
+    let temporary_directory = tempdir().unwrap();
+    let input_directory = temporary_directory.path().join("input");
+    let output_directory = temporary_directory.path().join("output");
+    fs::create_dir_all(&input_directory).unwrap();
+
+    let genome_path = temporary_directory.path().join("mini.fa");
+    fs::write(&genome_path, ">chr1\nAACGTTTCGAAACG\n").unwrap();
+    fs::write(
+        input_directory.join("sample.cov"),
+        "chr1\t3\t3\t75.000000\t3\t1\n",
+    )
+    .unwrap();
+
+    let command_output = Command::new(env!("CARGO_BIN_EXE_methx"))
+        .arg("process")
+        .arg("--input")
+        .arg(&input_directory)
+        .arg("--output")
+        .arg(&output_directory)
+        .arg("--genome")
+        .arg(&genome_path)
+        .arg("--threads")
+        .arg("1")
+        .arg("--remove-uncovered")
+        .arg("false")
+        .arg("--skip-annotation")
+        .output()
+        .unwrap();
+
+    assert!(
+        command_output.status.success(),
+        "methx process failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&command_output.stdout),
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+
+    let assays_path = output_directory.join("assays.h5");
+    let summary = validate_custom_hdf5(&assays_path).unwrap();
+    assert_eq!(summary.cpg_count, 3);
+
+    let file = hdf5::File::open(assays_path).unwrap();
+    assert_eq!(
+        file.dataset("cov").unwrap().read_raw::<u32>().unwrap(),
+        vec![4, 0, 0]
+    );
+}

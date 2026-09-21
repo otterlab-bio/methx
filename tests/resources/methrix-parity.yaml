@@ -1,0 +1,11 @@
+name: methrix-parity
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - r-base=4.4
+  - bioconductor-methrix=1.20.0
+  - bioconductor-biostrings
+  - bioconductor-rhdf5
+  - r-jsonlite
