@@ -1,0 +1,79 @@
+name: Native Platform Builds
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - platform: darwin-amd64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl and native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential musl-tools cmake binutils
+      - name: Build the locked release and run it
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export "CC_${TARGET//-/_}=musl-gcc"
+            # HDF5 needs to run native CMake probes even though the libc differs.
+            toolchain="$(mktemp)"
+            trap 'rm -f "$toolchain"' EXIT
+            printf '%s\n' 'set(CMAKE_C_COMPILER musl-gcc)' > "$toolchain"
+            export "CMAKE_TOOLCHAIN_FILE_${TARGET//-/_}=$toolchain"
+          else
+            export MACOSX_DEPLOYMENT_TARGET=13.0
+          fi
+          cargo build --release --locked --target "$TARGET" --bin methx --features download
+          mkdir -p artifacts
+          cp "target/$TARGET/release/methx" artifacts/methx
+          artifacts/methx --version
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            headers="$(readelf -l -d artifacts/methx)"
+            if grep -Eq '^[[:space:]]*INTERP[[:space:]]|[(]NEEDED[)]' <<< "$headers"; then
+              echo 'Expected a static musl binary' >&2
+              exit 1
+            fi
+          fi
+      - name: Archive the executable with its mode bits
+        run: tar -czf "$RUNNER_TEMP/methx.tar.gz" -C artifacts methx
+      - name: Upload the native executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: methx-${{ matrix.platform }}
+          path: ${{ runner.temp }}/methx.tar.gz
+          if-no-files-found: error
